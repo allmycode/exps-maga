@@ -3,6 +3,7 @@
 // Единая точка подключения библиотеки.
 
 #include "expassign/bucketing.hpp"
+#include "expassign/config_loader.hpp"
 #include "expassign/constraints/bool_constraint.hpp"
 #include "expassign/constraints/constraint.hpp"
 #include "expassign/constraints/domain_constraint.hpp"

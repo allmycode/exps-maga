@@ -227,26 +227,106 @@ bool SameAssignments(const std::vector<Assignment>& a,
   if (a.size() != b.size()) return false;
   for (size_t i = 0; i < a.size(); ++i) {
     if (a[i].ExperimentId() != b[i].ExperimentId() ||
-        a[i].group_index != b[i].group_index) {
+        a[i].group_index != b[i].group_index ||
+        a[i].sections != b[i].sections) {
       return false;
     }
   }
   return true;
 }
 
+// Программный Flatten() даёт только один AND-вариант ограничений,
+// последовательные группы и не более одной проверки слотов. Мутация
+// уплощённого списка добивает покрытие: OR-варианты, дыры между группами,
+// секции с собственными ограничениями, дополнительные уровни слотов и
+// разные алгоритмы хеширования. Оба матчера получают одинаковый вход.
+void MutateFlat(std::vector<FlatExperiment>& flat, Generator& gen) {
+  for (auto& exp : flat) {
+    if (gen.Chance(0.3)) exp.hash_algo = "XXH3";
+    for (auto& check : exp.slot_checks) {
+      if (gen.Chance(0.3)) check.hash_algo = "XXH3";
+    }
+
+    // Разрезать AND-список на два OR-варианта.
+    if (!exp.restrictions.empty() && exp.restrictions[0].size() >= 2 &&
+        gen.Chance(0.4)) {
+      auto& variant = exp.restrictions[0];
+      size_t cut = 1 + gen.Uniform(variant.size() - 1);
+      std::vector<ConstraintPtr> second(variant.begin() + cut, variant.end());
+      variant.resize(cut);
+      exp.restrictions.push_back(std::move(second));
+    }
+    // Дополнительный OR-вариант со случайными ограничениями.
+    if (gen.Chance(0.25)) {
+      std::vector<ConstraintPtr> extra;
+      size_t n = 1 + gen.Uniform(2);
+      for (size_t i = 0; i < n; ++i) extra.push_back(gen.RandomConstraint());
+      exp.restrictions.push_back(std::move(extra));
+    }
+
+    // Дыры между группами.
+    if (gen.Chance(0.4) && !exp.groups.empty()) {
+      std::vector<GroupRange> rebuilt;
+      uint32_t cursor = 0;
+      for (auto& g : exp.groups) {
+        uint32_t size = g.end - g.begin;
+        cursor += static_cast<uint32_t>(gen.Uniform(3));
+        if (cursor + size > exp.total_buckets) break;
+        g.begin = cursor;
+        g.end = cursor + size;
+        cursor = g.end;
+        rebuilt.push_back(g);
+      }
+      exp.groups = std::move(rebuilt);  // может стать пустым — тоже валидно
+    }
+
+    // Секции с собственными ограничениями.
+    for (auto& g : exp.groups) {
+      size_t n_sections = gen.Uniform(3);
+      for (size_t s = 0; s < n_sections; ++s) {
+        Section section;
+        section.params = "params-" + std::to_string(gen.Uniform(100));
+        if (gen.Chance(0.6)) {
+          section.restrictions.push_back({gen.RandomConstraint()});
+          if (gen.Chance(0.3)) {
+            section.restrictions.push_back(
+                {gen.RandomConstraint(), gen.RandomConstraint()});
+          }
+        }
+        g.sections.push_back(std::move(section));
+      }
+    }
+
+    // Дополнительный уровень проверки слотов.
+    if (gen.Chance(0.3)) {
+      SlotCheck check;
+      check.id_key = gen.Pick(gen.id_keys);
+      check.salt = "chain-" + std::to_string(gen.Uniform(1000));
+      check.total_slots = 4 + static_cast<uint32_t>(gen.Uniform(12));
+      for (uint32_t s = 0; s < check.total_slots; ++s) {
+        if (gen.Chance(0.5)) check.slots.push_back(s);
+      }
+      if (check.slots.empty()) check.slots.push_back(0);
+      exp.slot_checks.push_back(std::move(check));
+    }
+  }
+}
+
 }  // namespace
 
 TEST(randomized_equivalence) {
-  auto hasher = std::make_shared<XXHash64Hasher>();
+  auto hashers = HasherRegistry::CreateDefault();
   size_t total_assignments = 0;
   size_t nonempty_requests = 0;
+  size_t total_sections = 0;
 
   for (uint64_t seed = 1; seed <= 25; ++seed) {
     Generator gen(seed);
     Config config = gen.RandomConfig();
     auto flat = Flatten(config);
-    NaiveMatcher naive(flat, hasher);
-    IndexedMatcher indexed(flat, hasher);
+    MutateFlat(flat, gen);
+    NaiveMatcher naive(flat, hashers);
+    IndexedMatcher indexed(flat, hashers);
 
     for (int q = 0; q < 800; ++q) {
       Request req = gen.RandomRequest();
@@ -261,23 +341,38 @@ TEST(randomized_equivalence) {
       }
       total_assignments += a.size();
       if (!a.empty()) ++nonempty_requests;
+      for (const auto& assignment : a) {
+        total_sections += assignment.sections.size();
+      }
     }
   }
   // Убеждаемся, что тест реально что-то назначал, а не сравнивал пустоту.
-  std::printf("  assignments=%zu nonempty_requests=%zu\n", total_assignments,
-              nonempty_requests);
+  std::printf("  assignments=%zu nonempty_requests=%zu sections=%zu\n",
+              total_assignments, nonempty_requests, total_sections);
   CHECK(total_assignments > 1000);
   CHECK(nonempty_requests > 500);
+  CHECK(total_sections > 500);
 }
 
 TEST(empty_matcher) {
-  auto hasher = std::make_shared<XXHash64Hasher>();
-  NaiveMatcher naive({}, hasher);
-  IndexedMatcher indexed({}, hasher);
+  auto hashers = HasherRegistry::CreateDefault();
+  NaiveMatcher naive({}, hashers);
+  IndexedMatcher indexed({}, hashers);
   Request req;
   req.ids["uid"] = "u";
   CHECK(naive.Match(req).empty());
   CHECK(indexed.Match(req).empty());
+}
+
+TEST(unknown_hash_algo_rejected) {
+  Generator gen(7);
+  Config config = gen.RandomConfig();
+  auto flat = Flatten(config);
+  if (flat.empty()) return;
+  flat[0].hash_algo = "MURMUR";
+  auto hashers = HasherRegistry::CreateDefault();
+  CHECK_THROWS(NaiveMatcher(flat, hashers));
+  CHECK_THROWS(IndexedMatcher(flat, hashers));
 }
 
 TEST_MAIN()

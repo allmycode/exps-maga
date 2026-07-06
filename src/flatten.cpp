@@ -28,39 +28,46 @@ FlatExperiment FlattenOne(const ExperimentConfig& exp, const DimensionConfig* di
 
   FlatExperiment f;
   f.id = exp.id;
+  std::vector<ConstraintPtr> combined;
   if (dim) {
-    f.has_dimension = true;
     f.dimension_id = dim->id;
-    f.dim_id_key = dim->id_key;
-    f.dim_salt = dim->salt;
-    f.dim_total_slots = dim->total_slots;
-    f.slots = exp.slots;
-    std::sort(f.slots.begin(), f.slots.end());
-    f.constraints = dim->constraints;
-    f.constraints.insert(f.constraints.end(), exp.constraints.begin(),
-                         exp.constraints.end());
-    if (f.slots.empty()) {
+    SlotCheck check;
+    check.id_key = dim->id_key;
+    check.salt = dim->salt;
+    check.total_slots = dim->total_slots;
+    check.slots = exp.slots;
+    std::sort(check.slots.begin(), check.slots.end());
+    if (check.slots.empty()) {
       throw std::invalid_argument("experiment '" + exp.id + "' in dimension '" +
                                   dim->id + "' occupies no slots");
     }
-    for (uint32_t s : f.slots) {
+    for (uint32_t s : check.slots) {
       if (s >= dim->total_slots) {
         throw std::invalid_argument("experiment '" + exp.id + "': slot " +
                                     std::to_string(s) + " >= total_slots of '" +
                                     dim->id + "'");
       }
     }
+    f.slot_checks.push_back(std::move(check));
+    combined = dim->constraints;
+    combined.insert(combined.end(), exp.constraints.begin(),
+                    exp.constraints.end());
   } else {
-    f.constraints = exp.constraints;
+    combined = exp.constraints;
   }
+  if (!combined.empty()) f.restrictions.push_back(std::move(combined));
+
   f.id_key = exp.id_key;
   f.salt = exp.salt;
   f.total_buckets = exp.total_buckets;
-  f.groups = exp.groups;
-  uint32_t end = 0;
+  uint32_t cursor = 0;
   for (const auto& g : exp.groups) {
-    end += g.buckets;
-    f.group_ends.push_back(end);
+    GroupRange range;
+    range.name = g.name;
+    range.begin = cursor;
+    range.end = cursor + g.buckets;
+    cursor = range.end;
+    f.groups.push_back(std::move(range));
   }
   return f;
 }

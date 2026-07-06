@@ -20,6 +20,8 @@ add_library(expassign
   src/flatten.cpp
   src/naive_matcher.cpp
   src/indexed_matcher.cpp
+  src/json.cpp
+  src/config_loader.cpp
 )
 target_include_directories(expassign PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(expassign PRIVATE -Wall -Wextra)
@@ -33,6 +35,10 @@ add_test(NAME constraints COMMAND test_constraints)
 add_executable(test_matchers_equivalence tests/test_matchers_equivalence.cpp)
 target_link_libraries(test_matchers_equivalence PRIVATE expassign)
 add_test(NAME matchers_equivalence COMMAND test_matchers_equivalence)
+
+add_executable(test_config_loader tests/test_config_loader.cpp)
+target_link_libraries(test_config_loader PRIVATE expassign)
+add_test(NAME config_loader COMMAND test_config_loader)
 
 add_executable(expassign_bench bench/bench.cpp)
 target_link_libraries(expassign_bench PRIVATE expassign)

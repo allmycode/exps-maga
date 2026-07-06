@@ -5,34 +5,39 @@
 namespace expassign {
 
 NaiveMatcher::NaiveMatcher(std::vector<FlatExperiment> experiments,
-                           std::shared_ptr<const IHasher> hasher)
-    : experiments_(std::move(experiments)), hasher_(std::move(hasher)) {}
+                           std::shared_ptr<const HasherRegistry> hashers)
+    : experiments_(std::move(experiments)), hashers_(std::move(hashers)) {
+  ValidateHashers(experiments_, *hashers_);
+}
 
 std::vector<Assignment> NaiveMatcher::Match(const Request& request) const {
   std::vector<Assignment> result;
   for (const FlatExperiment& exp : experiments_) {
-    bool ok = true;
-    for (const ConstraintPtr& c : exp.constraints) {
-      if (!c->Matches(request)) {
-        ok = false;
+    if (!RestrictionsMatch(exp.restrictions, request)) continue;
+
+    bool slots_ok = true;
+    for (const SlotCheck& check : exp.slot_checks) {
+      auto id_it = request.ids.find(check.id_key);
+      if (id_it == request.ids.end()) {
+        slots_ok = false;
+        break;
+      }
+      const IHasher* hasher = hashers_->Get(check.hash_algo);
+      if (!SlotAllowed(check, SaltedHash(*hasher, id_it->second, check.salt))) {
+        slots_ok = false;
         break;
       }
     }
-    if (!ok) continue;
-
-    if (exp.has_dimension) {
-      auto id_it = request.ids.find(exp.dim_id_key);
-      if (id_it == request.ids.end()) continue;
-      if (!SlotAllowed(exp, SaltedHash(*hasher_, id_it->second, exp.dim_salt))) {
-        continue;
-      }
-    }
+    if (!slots_ok) continue;
 
     auto id_it = request.ids.find(exp.id_key);
     if (id_it == request.ids.end()) continue;
+    const IHasher* hasher = hashers_->Get(exp.hash_algo);
     auto group =
-        GroupForBucket(exp, SaltedHash(*hasher_, id_it->second, exp.salt));
-    if (group) result.push_back(Assignment{&exp, *group});
+        GroupForBucket(exp, SaltedHash(*hasher, id_it->second, exp.salt));
+    if (!group) continue;
+    result.push_back(Assignment{&exp, *group,
+                                MatchedSections(exp.groups[*group], request)});
   }
   return result;
 }

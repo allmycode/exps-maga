@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -9,15 +10,16 @@
 
 namespace expassign {
 
-// Результат назначения: эксперимент и выбранная в нём группа.
+// Результат назначения: эксперимент, выбранная группа (testid) и индексы
+// секций группы, чьи ограничения выполнены для запроса.
 struct Assignment {
   const FlatExperiment* experiment = nullptr;
   size_t group_index = 0;
+  std::vector<uint32_t> sections;
 
   const std::string& ExperimentId() const { return experiment->id; }
-  const std::string& GroupName() const {
-    return experiment->groups[group_index].name;
-  }
+  const GroupRange& Group() const { return experiment->groups[group_index]; }
+  const std::string& GroupName() const { return Group().name; }
 };
 
 class IMatcher {
@@ -25,7 +27,7 @@ class IMatcher {
   virtual ~IMatcher() = default;
 
   // Возвращает назначения в порядке следования экспериментов в уплощённом
-  // списке.
+  // списке; не более одного назначения на эксперимент.
   virtual std::vector<Assignment> Match(const Request& request) const = 0;
 };
 

@@ -14,7 +14,7 @@ namespace expassign {
 class NaiveMatcher final : public IMatcher {
  public:
   NaiveMatcher(std::vector<FlatExperiment> experiments,
-               std::shared_ptr<const IHasher> hasher);
+               std::shared_ptr<const HasherRegistry> hashers);
 
   std::vector<Assignment> Match(const Request& request) const override;
 
@@ -22,7 +22,7 @@ class NaiveMatcher final : public IMatcher {
 
  private:
   std::vector<FlatExperiment> experiments_;
-  std::shared_ptr<const IHasher> hasher_;
+  std::shared_ptr<const HasherRegistry> hashers_;
 };
 
 }  // namespace expassign

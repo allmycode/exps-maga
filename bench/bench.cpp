@@ -198,7 +198,7 @@ void RunBench(const char* name, const Matcher& matcher,
 
 int main() {
   Generator gen;
-  auto hasher = std::make_shared<XXHash64Hasher>();
+  auto hashers = HasherRegistry::CreateDefault();
 
   for (auto [dims, per_dim] : {std::pair<size_t, size_t>{10, 100},
                                {25, 400},
@@ -210,13 +210,13 @@ int main() {
                 flat.size(), dims, per_dim);
 
     auto build_start = Clock::now();
-    IndexedMatcher indexed(flat, hasher);
+    IndexedMatcher indexed(flat, hashers);
     auto build_stop = Clock::now();
     std::printf("index build: %.1f ms\n",
                 std::chrono::duration<double, std::milli>(build_stop -
                                                           build_start)
                     .count());
-    NaiveMatcher naive(flat, hasher);
+    NaiveMatcher naive(flat, hashers);
 
     std::vector<Request> requests;
     for (int i = 0; i < 2000; ++i) requests.push_back(gen.RandomRequest());

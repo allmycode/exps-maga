@@ -75,7 +75,7 @@ int main() {
   config.experiments.push_back(ranking);
 
   auto flat = Flatten(config);
-  IndexedMatcher matcher(flat, std::make_shared<XXHash64Hasher>());
+  IndexedMatcher matcher(flat, HasherRegistry::CreateDefault());
 
   Request req;
   req.strings["service"] = "web";

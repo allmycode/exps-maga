@@ -272,9 +272,13 @@ TEST(flatten_validation) {
   ok.experiments.push_back(make_exp("free", {}));
   auto flat = Flatten(ok);
   CHECK(flat.size() == 3);
-  CHECK(flat[0].has_dimension && flat[0].dimension_id == "d1");
-  CHECK(!flat[2].has_dimension);
-  CHECK(flat[0].group_ends == (std::vector<uint32_t>{50, 100}));
+  CHECK(flat[0].slot_checks.size() == 1 && flat[0].dimension_id == "d1");
+  CHECK(flat[0].slot_checks[0].total_slots == 10);
+  CHECK(flat[2].slot_checks.empty());
+  CHECK(flat[0].groups.size() == 2);
+  CHECK(flat[0].groups[0].begin == 0 && flat[0].groups[0].end == 50);
+  CHECK(flat[0].groups[1].begin == 50 && flat[0].groups[1].end == 100);
+  CHECK(flat[0].restrictions.empty());  // ограничений не задано
 
   // Пересечение слотов.
   Config bad = ok;
@@ -315,10 +319,10 @@ TEST(end_to_end_smoke) {
   dim.experiments.push_back(e1);
   config.dimensions.push_back(dim);
 
-  auto hasher = std::make_shared<XXHash64Hasher>();
+  auto hashers = HasherRegistry::CreateDefault();
   auto flat = Flatten(config);
-  NaiveMatcher naive(flat, hasher);
-  IndexedMatcher indexed(flat, hasher);
+  NaiveMatcher naive(flat, hashers);
+  IndexedMatcher indexed(flat, hashers);
 
   int assigned = 0;
   for (int u = 0; u < 1000; ++u) {

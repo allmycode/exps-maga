@@ -13,38 +13,38 @@
 namespace expassign {
 namespace {
 
-// Черновой слой на этапе построения: какие эксперименты уже заняли слой и
-// какие ограничения в него попали.
+// Черновой слой на этапе построения: какие варианты уже заняли слой и какие
+// ограничения в него попали.
 template <typename ConstraintT>
 struct LayerDraft {
   std::vector<std::pair<uint32_t, const ConstraintT*>> entries;
   std::vector<bool> present;
 };
 
-// Раскладывает ограничения по слоям: каждый эксперимент присутствует в слое
-// не более одного раза, поэтому несколько ограничений одного эксперимента на
-// одно свойство уходят в разные слои.
+// Раскладывает ограничения по слоям: каждый вариант присутствует в слое не
+// более одного раза, поэтому несколько ограничений одного варианта на одно
+// свойство уходят в разные слои.
 template <typename ConstraintT>
-void AddToLayers(std::vector<LayerDraft<ConstraintT>>& layers, size_t n_exps,
-                 uint32_t exp, const ConstraintT* constraint) {
+void AddToLayers(std::vector<LayerDraft<ConstraintT>>& layers, size_t n_variants,
+                 uint32_t variant, const ConstraintT* constraint) {
   for (auto& layer : layers) {
-    if (!layer.present[exp]) {
-      layer.present[exp] = true;
-      layer.entries.emplace_back(exp, constraint);
+    if (!layer.present[variant]) {
+      layer.present[variant] = true;
+      layer.entries.emplace_back(variant, constraint);
       return;
     }
   }
   auto& layer = layers.emplace_back();
-  layer.present.assign(n_exps, false);
-  layer.present[exp] = true;
-  layer.entries.emplace_back(exp, constraint);
+  layer.present.assign(n_variants, false);
+  layer.present[variant] = true;
+  layer.entries.emplace_back(variant, constraint);
 }
 
 template <typename ConstraintT>
 DynamicBitset UnconstrainedBits(const LayerDraft<ConstraintT>& draft, size_t n) {
   DynamicBitset bits(n);
   bits.SetAll();
-  for (const auto& [exp, _] : draft.entries) bits.Reset(exp);
+  for (const auto& [variant, _] : draft.entries) bits.Reset(variant);
   return bits;
 }
 
@@ -59,10 +59,10 @@ void IndexedMatcher::StringLayer::Filter(const Request& request,
   if (it == request.strings.end()) return;  // все ограниченные — мимо
   out |= negated;
   if (auto n = not_in_lists.find(it->second); n != not_in_lists.end()) {
-    for (uint32_t exp : n->second) out.Reset(exp);
+    for (uint32_t variant : n->second) out.Reset(variant);
   }
   if (auto p = in_lists.find(it->second); p != in_lists.end()) {
-    for (uint32_t exp : p->second) out.Set(exp);
+    for (uint32_t variant : p->second) out.Set(variant);
   }
 }
 
@@ -147,9 +147,9 @@ void IndexedMatcher::DomainLayer::Filter(const Request& request,
       const Node& node = nodes[cur[i]];
       // '*' допускает ноль и более дополнительных меток слева, поэтому
       // засчитываем его на каждом пройденном узле.
-      for (uint32_t exp : node.star_exps) out.Set(exp);
+      for (uint32_t variant : node.star_vars) out.Set(variant);
       if (consumed == labels.size()) {
-        for (uint32_t exp : node.exact_exps) out.Set(exp);
+        for (uint32_t variant : node.exact_vars) out.Set(variant);
       }
     }
     if (consumed == labels.size()) break;
@@ -174,14 +174,14 @@ void IndexedMatcher::RegionLayer::Filter(const Request& request,
   auto region = RegionConstraint::Resolve(request, property, *tree);
   if (!region) return;  // регион не определён — все ограниченные мимо
   out |= negated;
-  // Внутри слоя эксперимент либо позитивный, либо негативный, поэтому Set и
+  // Внутри слоя вариант либо позитивный, либо негативный, поэтому Set и
   // Reset по разным предкам не конфликтуют между собой.
   tree->ForEachAncestor(*region, [&](uint32_t ancestor) {
     if (auto n = not_in_lists.find(ancestor); n != not_in_lists.end()) {
-      for (uint32_t exp : n->second) out.Reset(exp);
+      for (uint32_t variant : n->second) out.Reset(variant);
     }
     if (auto p = in_lists.find(ancestor); p != in_lists.end()) {
-      for (uint32_t exp : p->second) out.Set(exp);
+      for (uint32_t variant : p->second) out.Set(variant);
     }
   });
 }
@@ -189,23 +189,44 @@ void IndexedMatcher::RegionLayer::Filter(const Request& request,
 // --- IndexedMatcher -----------------------------------------------------------
 
 IndexedMatcher::IndexedMatcher(std::vector<FlatExperiment> experiments,
-                               std::shared_ptr<const IHasher> hasher)
-    : experiments_(std::move(experiments)), hasher_(std::move(hasher)) {
+                               std::shared_ptr<const HasherRegistry> hashers)
+    : experiments_(std::move(experiments)), hashers_(std::move(hashers)) {
+  ValidateHashers(experiments_, *hashers_);
   BuildIndexes();
 }
 
 uint32_t IndexedMatcher::InternHashKey(const std::string& id_key,
+                                       const std::string& algo,
                                        const std::string& salt) {
-  std::string key = id_key + '\x1f' + salt;
+  std::string key = id_key + '\x1f' + algo + '\x1f' + salt;
   auto [it, inserted] =
       hash_key_index_.emplace(std::move(key), hash_keys_.size());
-  if (inserted) hash_keys_.push_back(HashKey{id_key, salt});
+  if (inserted) {
+    hash_keys_.push_back(HashKey{id_key, salt, hashers_->Get(algo)});
+  }
   return it->second;
 }
 
 void IndexedMatcher::BuildIndexes() {
   const size_t n = experiments_.size();
 
+  // Проход 1: раскладка вариантов по битам и кеш-ключи хешей. Эксперимент без
+  // ограничений получает один вариант без ограничений.
+  hash_refs_.resize(n);
+  for (uint32_t i = 0; i < n; ++i) {
+    const FlatExperiment& exp = experiments_[i];
+    for (const SlotCheck& check : exp.slot_checks) {
+      hash_refs_[i].slot_keys.push_back(
+          InternHashKey(check.id_key, check.hash_algo, check.salt));
+    }
+    hash_refs_[i].bucket_key = InternHashKey(exp.id_key, exp.hash_algo, exp.salt);
+
+    size_t variants = exp.restrictions.empty() ? 1 : exp.restrictions.size();
+    for (size_t v = 0; v < variants; ++v) variant_exp_.push_back(i);
+  }
+  const size_t nv = variant_exp_.size();
+
+  // Проход 2: раскладка ограничений по слоям свойств.
   std::unordered_map<std::string, std::vector<LayerDraft<StringConstraint>>>
       string_drafts;
   std::unordered_map<std::string, std::vector<LayerDraft<BoolConstraint>>>
@@ -217,37 +238,39 @@ void IndexedMatcher::BuildIndexes() {
   std::unordered_map<std::string, std::vector<LayerDraft<RegionConstraint>>>
       region_drafts;
 
-  hash_refs_.resize(n);
+  uint32_t variant = 0;
   for (uint32_t i = 0; i < n; ++i) {
     const FlatExperiment& exp = experiments_[i];
-    if (exp.has_dimension) {
-      hash_refs_[i].dim_hash = InternHashKey(exp.dim_id_key, exp.dim_salt);
+    if (exp.restrictions.empty()) {
+      ++variant;  // вариант без ограничений: во всех слоях unconstrained
+      continue;
     }
-    hash_refs_[i].exp_hash = InternHashKey(exp.id_key, exp.salt);
-
-    for (const ConstraintPtr& c : exp.constraints) {
-      switch (c->Type()) {
-        case PropertyType::kString:
-          AddToLayers(string_drafts[c->Property()], n, i,
-                      static_cast<const StringConstraint*>(c.get()));
-          break;
-        case PropertyType::kBool:
-          AddToLayers(bool_drafts[c->Property()], n, i,
-                      static_cast<const BoolConstraint*>(c.get()));
-          break;
-        case PropertyType::kVersion:
-          AddToLayers(version_drafts[c->Property()], n, i,
-                      static_cast<const VersionConstraint*>(c.get()));
-          break;
-        case PropertyType::kDomain:
-          AddToLayers(domain_drafts[c->Property()], n, i,
-                      static_cast<const DomainConstraint*>(c.get()));
-          break;
-        case PropertyType::kRegion:
-          AddToLayers(region_drafts[c->Property()], n, i,
-                      static_cast<const RegionConstraint*>(c.get()));
-          break;
+    for (const auto& and_group : exp.restrictions) {
+      for (const ConstraintPtr& c : and_group) {
+        switch (c->Type()) {
+          case PropertyType::kString:
+            AddToLayers(string_drafts[c->Property()], nv, variant,
+                        static_cast<const StringConstraint*>(c.get()));
+            break;
+          case PropertyType::kBool:
+            AddToLayers(bool_drafts[c->Property()], nv, variant,
+                        static_cast<const BoolConstraint*>(c.get()));
+            break;
+          case PropertyType::kVersion:
+            AddToLayers(version_drafts[c->Property()], nv, variant,
+                        static_cast<const VersionConstraint*>(c.get()));
+            break;
+          case PropertyType::kDomain:
+            AddToLayers(domain_drafts[c->Property()], nv, variant,
+                        static_cast<const DomainConstraint*>(c.get()));
+            break;
+          case PropertyType::kRegion:
+            AddToLayers(region_drafts[c->Property()], nv, variant,
+                        static_cast<const RegionConstraint*>(c.get()));
+            break;
+        }
       }
+      ++variant;
     }
   }
 
@@ -255,13 +278,13 @@ void IndexedMatcher::BuildIndexes() {
     for (auto& draft : drafts) {
       StringLayer layer;
       layer.property = property;
-      layer.unconstrained = UnconstrainedBits(draft, n);
-      layer.negated = DynamicBitset(n);
-      for (const auto& [exp, c] : draft.entries) {
+      layer.unconstrained = UnconstrainedBits(draft, nv);
+      layer.negated = DynamicBitset(nv);
+      for (const auto& [var, c] : draft.entries) {
         auto& lists = c->Negated() ? layer.not_in_lists : layer.in_lists;
-        if (c->Negated()) layer.negated.Set(exp);
+        if (c->Negated()) layer.negated.Set(var);
         for (const std::string& value : c->Values()) {
-          lists[value].push_back(exp);
+          lists[value].push_back(var);
         }
       }
       string_layers_.push_back(std::move(layer));
@@ -272,11 +295,11 @@ void IndexedMatcher::BuildIndexes() {
     for (auto& draft : drafts) {
       BoolLayer layer;
       layer.property = property;
-      layer.unconstrained = UnconstrainedBits(draft, n);
+      layer.unconstrained = UnconstrainedBits(draft, nv);
       layer.when_true = layer.unconstrained;
       layer.when_false = layer.unconstrained;
-      for (const auto& [exp, c] : draft.entries) {
-        (c->Expected() ? layer.when_true : layer.when_false).Set(exp);
+      for (const auto& [var, c] : draft.entries) {
+        (c->Expected() ? layer.when_true : layer.when_false).Set(var);
       }
       bool_layers_.push_back(std::move(layer));
     }
@@ -286,9 +309,9 @@ void IndexedMatcher::BuildIndexes() {
     for (auto& draft : drafts) {
       VersionLayer layer;
       layer.property = property;
-      layer.unconstrained = UnconstrainedBits(draft, n);
+      layer.unconstrained = UnconstrainedBits(draft, nv);
 
-      for (const auto& [exp, c] : draft.entries) {
+      for (const auto& [var, c] : draft.entries) {
         for (const VersionInterval& iv : c->Intervals()) {
           if (iv.lo) layer.points.push_back(*iv.lo);
           if (iv.hi) layer.points.push_back(*iv.hi);
@@ -307,7 +330,7 @@ void IndexedMatcher::BuildIndexes() {
 
       size_t n_regions = 2 * layer.points.size() + 1;
       layer.regions.assign(n_regions, layer.unconstrained);
-      for (const auto& [exp, c] : draft.entries) {
+      for (const auto& [var, c] : draft.entries) {
         for (const VersionInterval& iv : c->Intervals()) {
           size_t first = 0;
           if (iv.lo) {
@@ -320,7 +343,7 @@ void IndexedMatcher::BuildIndexes() {
             last = iv.hi_inclusive ? 2 * j + 1 : 2 * j;
           }
           for (size_t r = first; r <= last && r < n_regions; ++r) {
-            layer.regions[r].Set(exp);
+            layer.regions[r].Set(var);
           }
         }
       }
@@ -332,9 +355,9 @@ void IndexedMatcher::BuildIndexes() {
     for (auto& draft : drafts) {
       DomainLayer layer;
       layer.property = property;
-      layer.unconstrained = UnconstrainedBits(draft, n);
+      layer.unconstrained = UnconstrainedBits(draft, nv);
       layer.nodes.emplace_back();  // корень
-      for (const auto& [exp, c] : draft.entries) {
+      for (const auto& [var, c] : draft.entries) {
         for (const DomainConstraint::Pattern& p : c->Patterns()) {
           uint32_t cur = 0;
           if (p.tld_wildcard) cur = layer.AddTldChild(cur);
@@ -342,8 +365,8 @@ void IndexedMatcher::BuildIndexes() {
             cur = layer.AddChild(cur, label);
           }
           auto& list =
-              p.star ? layer.nodes[cur].star_exps : layer.nodes[cur].exact_exps;
-          if (list.empty() || list.back() != exp) list.push_back(exp);
+              p.star ? layer.nodes[cur].star_vars : layer.nodes[cur].exact_vars;
+          if (list.empty() || list.back() != var) list.push_back(var);
         }
       }
       domain_layers_.push_back(std::move(layer));
@@ -354,9 +377,9 @@ void IndexedMatcher::BuildIndexes() {
     for (auto& draft : drafts) {
       RegionLayer layer;
       layer.property = property;
-      layer.unconstrained = UnconstrainedBits(draft, n);
-      layer.negated = DynamicBitset(n);
-      for (const auto& [exp, c] : draft.entries) {
+      layer.unconstrained = UnconstrainedBits(draft, nv);
+      layer.negated = DynamicBitset(nv);
+      for (const auto& [var, c] : draft.entries) {
         if (!layer.tree) {
           layer.tree = c->Tree();
         } else if (layer.tree != c->Tree()) {
@@ -365,9 +388,9 @@ void IndexedMatcher::BuildIndexes() {
               "' use different region trees; a single shared tree is required");
         }
         auto& lists = c->Negated() ? layer.not_in_lists : layer.in_lists;
-        if (c->Negated()) layer.negated.Set(exp);
+        if (c->Negated()) layer.negated.Set(var);
         for (RegionTree::RegionId region : c->Regions()) {
-          lists[region].push_back(exp);
+          lists[region].push_back(var);
         }
       }
       region_layers_.push_back(std::move(layer));
@@ -376,13 +399,13 @@ void IndexedMatcher::BuildIndexes() {
 }
 
 std::vector<Assignment> IndexedMatcher::Match(const Request& request) const {
-  const size_t n = experiments_.size();
   std::vector<Assignment> result;
-  if (n == 0) return result;
+  if (experiments_.empty()) return result;
+  const size_t nv = variant_exp_.size();
 
-  DynamicBitset acc(n);
+  DynamicBitset acc(nv);
   acc.SetAll();
-  DynamicBitset scratch(n);
+  DynamicBitset scratch(nv);
 
   auto apply = [&](const auto& layers) {
     for (const auto& layer : layers) {
@@ -398,8 +421,9 @@ std::vector<Assignment> IndexedMatcher::Match(const Request& request) const {
     return result;
   }
 
-  // Кеш хешей на запрос: эксперименты одного измерения (и эксперименты с
-  // одинаковой солью) переиспользуют вычисленный хеш.
+  // Кеш хешей на запрос: разбиения с одинаковой тройкой (идентификатор,
+  // алгоритм, соль) — например, эксперименты одного измерения — переиспользуют
+  // вычисленный хеш.
   enum class CacheState : uint8_t { kUnknown, kMissingId, kReady };
   struct CacheEntry {
     CacheState state = CacheState::kUnknown;
@@ -415,22 +439,35 @@ std::vector<Assignment> IndexedMatcher::Match(const Request& request) const {
         entry.state = CacheState::kMissingId;
       } else {
         entry.state = CacheState::kReady;
-        entry.hash = SaltedHash(*hasher_, it->second, key.salt);
+        entry.hash = SaltedHash(*key.hasher, it->second, key.salt);
       }
     }
     return entry;
   };
 
-  acc.ForEachSet([&](size_t i) {
+  // Варианты одного эксперимента лежат подряд, биты обходятся по возрастанию,
+  // поэтому для дедупликации достаточно помнить последний эксперимент.
+  size_t last_exp = SIZE_MAX;
+  acc.ForEachSet([&](size_t v) {
+    size_t i = variant_exp_[v];
+    if (i == last_exp) return;
+    last_exp = i;
+
     const FlatExperiment& exp = experiments_[i];
-    if (exp.has_dimension) {
-      const CacheEntry& dim = salted_hash(hash_refs_[i].dim_hash);
-      if (dim.state != CacheState::kReady || !SlotAllowed(exp, dim.hash)) return;
+    const ExperimentHashRefs& refs = hash_refs_[i];
+    for (size_t s = 0; s < exp.slot_checks.size(); ++s) {
+      const CacheEntry& entry = salted_hash(refs.slot_keys[s]);
+      if (entry.state != CacheState::kReady ||
+          !SlotAllowed(exp.slot_checks[s], entry.hash)) {
+        return;
+      }
     }
-    const CacheEntry& own = salted_hash(hash_refs_[i].exp_hash);
+    const CacheEntry& own = salted_hash(refs.bucket_key);
     if (own.state != CacheState::kReady) return;
     auto group = GroupForBucket(exp, own.hash);
-    if (group) result.push_back(Assignment{&experiments_[i], *group});
+    if (!group) return;
+    result.push_back(Assignment{&experiments_[i], *group,
+                                MatchedSections(exp.groups[*group], request)});
   });
   return result;
 }
