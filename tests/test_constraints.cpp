@@ -137,6 +137,113 @@ TEST(domain_constraint_matches) {
   CHECK(!c.Matches(Request{}));
 }
 
+namespace {
+
+// 1 (мир) <- 2 (Европа) <- 3 (Россия) <- 4 (Москва); 5 (США) <- 1.
+std::shared_ptr<RegionTree> MakeTestTree() {
+  auto tree = std::make_shared<RegionTree>();
+  tree->AddRegion(1, 1);  // корень
+  tree->AddRegion(2, 1);
+  tree->AddRegion(3, 2);
+  tree->AddRegion(4, 3);
+  tree->AddRegion(5, 1);
+  tree->AddIpRange("10.0.0.0", "10.0.0.255", 4);
+  tree->AddIpRange("10.0.1.0", "10.0.1.255", 5);
+  tree->AddIpRange("2001:db8::", "2001:db8::ffff", 2);
+  tree->Build();
+  return tree;
+}
+
+}  // namespace
+
+TEST(region_tree) {
+  auto tree = MakeTestTree();
+  CHECK(!tree->Parent(1).has_value());
+  CHECK(tree->Parent(4) == 3u);
+
+  CHECK(tree->Contains(1, 4));   // Москва внутри мира
+  CHECK(tree->Contains(2, 4));   // и внутри Европы
+  CHECK(tree->Contains(4, 4));   // регион входит сам в себя
+  CHECK(!tree->Contains(5, 4));  // но не внутри США
+  CHECK(!tree->Contains(4, 2));  // Европа не внутри Москвы
+  CHECK(!tree->Contains(1, 99)); // неизвестный регион — только сам в себя
+  CHECK(tree->Contains(99, 99));
+
+  CHECK(tree->RegionByIp("10.0.0.42") == 4u);
+  CHECK(tree->RegionByIp("10.0.1.7") == 5u);
+  CHECK(tree->RegionByIp("::ffff:10.0.0.42") == 4u);  // IPv4-mapped запись
+  CHECK(tree->RegionByIp("2001:db8::abcd") == 2u);
+  CHECK(!tree->RegionByIp("10.0.2.1").has_value());   // вне диапазонов
+  CHECK(!tree->RegionByIp("999.1.1.1").has_value());  // некорректный IP
+  CHECK(!tree->RegionByIp("garbage").has_value());
+  CHECK(!tree->RegionByIp("").has_value());
+
+  RegionTree dup;
+  dup.AddRegion(1, 1);
+  CHECK_THROWS(dup.AddRegion(1, 1));
+
+  RegionTree overlapping;
+  overlapping.AddIpRange("10.0.0.0", "10.0.0.100", 1);
+  overlapping.AddIpRange("10.0.0.100", "10.0.0.200", 2);
+  CHECK_THROWS(overlapping.Build());
+
+  RegionTree cyclic;
+  cyclic.AddRegion(7, 8);
+  cyclic.AddRegion(8, 7);
+  CHECK_THROWS(cyclic.Build());
+
+  RegionTree bad;
+  CHECK_THROWS(bad.AddIpRange("10.0.0.5", "10.0.0.1", 1));  // from > to
+  CHECK_THROWS(bad.AddIpRange("nope", "10.0.0.1", 1));
+}
+
+TEST(region_constraint) {
+  auto tree = MakeTestTree();
+  RegionConstraint in_europe("geo", tree, {2});
+  RegionConstraint not_in_europe("geo", tree, {2}, /*negated=*/true);
+
+  Request req;
+  req.regions["geo"] = 4;  // Москва — внутри Европы по цепочке предков
+  CHECK(in_europe.Matches(req));
+  CHECK(!not_in_europe.Matches(req));
+
+  req.regions["geo"] = 5;  // США
+  CHECK(!in_europe.Matches(req));
+  CHECK(not_in_europe.Matches(req));
+
+  req.regions["geo"] = 2;  // сама Европа
+  CHECK(in_europe.Matches(req));
+
+  // Неизвестный дереву регион: определён, но никуда не входит.
+  req.regions["geo"] = 99;
+  CHECK(!in_europe.Matches(req));
+  CHECK(not_in_europe.Matches(req));
+
+  // Регион не определён — не выполнено в обоих режимах.
+  Request empty;
+  CHECK(!in_europe.Matches(empty));
+  CHECK(!not_in_europe.Matches(empty));
+
+  // Определение региона по IP при отсутствии явного id.
+  Request by_ip;
+  by_ip.ip = "10.0.0.42";  // Москва
+  CHECK(in_europe.Matches(by_ip));
+  by_ip.ip = "10.0.1.7";  // США
+  CHECK(!in_europe.Matches(by_ip));
+  by_ip.ip = "10.0.2.1";  // вне диапазонов — регион не определён
+  CHECK(!in_europe.Matches(by_ip));
+  CHECK(!not_in_europe.Matches(by_ip));
+
+  // Явный id имеет приоритет над IP.
+  Request both;
+  both.regions["geo"] = 5;
+  both.ip = "10.0.0.42";
+  CHECK(!in_europe.Matches(both));
+
+  CHECK_THROWS(RegionConstraint("geo", tree, {}));
+  CHECK_THROWS(RegionConstraint("geo", nullptr, {1}));
+}
+
 TEST(xxh64_reference_vectors) {
   CHECK(XXH64("", 0, 0) == 0xEF46DB3751D8E999ULL);
   CHECK(XXH64("abc", 3, 0) == 0x44BC2CF5AD770999ULL);

@@ -10,6 +10,17 @@ using namespace expassign;
 int main() {
   Config config;
 
+  // Дерево регионов: 1 (мир) <- 2 (Европа) <- 3 (Россия) <- 4 (Москва);
+  // 5 (США) <- 1. Плюс диапазон IP, попадающий в Москву.
+  auto geo = std::make_shared<RegionTree>();
+  geo->AddRegion(1, 1);
+  geo->AddRegion(2, 1);
+  geo->AddRegion(3, 2);
+  geo->AddRegion(4, 3);
+  geo->AddRegion(5, 1);
+  geo->AddIpRange("192.168.1.0", "192.168.1.255", 4);
+  geo->Build();
+
   // Измерение: эксперименты над UI, взаимоисключающие между собой.
   DimensionConfig ui;
   ui.id = "ui-dimension";
@@ -57,6 +68,9 @@ int main() {
   ranking.constraints = {
       std::make_shared<StringConstraint>(
           "country", std::vector<std::string>{"kp"}, /*negated=*/true),
+      // Только Европа; регион запроса определится по IP.
+      std::make_shared<RegionConstraint>(
+          "geo", geo, std::vector<RegionTree::RegionId>{2}),
   };
   config.experiments.push_back(ranking);
 
@@ -69,6 +83,7 @@ int main() {
   req.bools["internal"] = false;
   req.versions["app_version"] = *Version::Parse("2.7.1.9000");
   req.domains["host"] = "www.example.com";
+  req.ip = "192.168.1.10";  // Москва -> внутри Европы
   req.ids["uid"] = "user-39";
   req.ids["device_id"] = "device-39";
 

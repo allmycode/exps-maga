@@ -15,7 +15,23 @@ namespace {
 struct Generator {
   std::mt19937_64 rng;
 
-  explicit Generator(uint64_t seed) : rng(seed) {}
+  explicit Generator(uint64_t seed) : rng(seed) {
+    // Случайное дерево из 30 регионов: регион 1 — корень, родитель региона
+    // i — случайный регион с меньшим номером.
+    tree = std::make_shared<RegionTree>();
+    tree->AddRegion(1, 1);
+    for (uint32_t r = 2; r <= 30; ++r) {
+      tree->AddRegion(r, 1 + static_cast<uint32_t>(Uniform(r - 1)));
+    }
+    // Диапазоны IP на часть регионов; часть адресного пространства остаётся
+    // непокрытой.
+    for (int i = 0; i < 10; ++i) {
+      std::string base = "10.0." + std::to_string(i) + ".";
+      tree->AddIpRange(base + "0", base + "255",
+                       1 + static_cast<uint32_t>(Uniform(30)));
+    }
+    tree->Build();
+  }
 
   size_t Uniform(size_t n) { return rng() % n; }
   bool Chance(double p) {
@@ -39,6 +55,8 @@ struct Generator {
   std::vector<std::string> tlds{"ru", "com", "net"};
   std::vector<std::string> subs{"www", "m", "api", "static"};
   std::vector<std::string> id_keys{"uid", "device_id"};
+  std::vector<std::string> region_props{"geo", "geo_billing"};
+  std::shared_ptr<RegionTree> tree;
 
   Version RandomVersion() {
     size_t n = 1 + Uniform(4);
@@ -67,7 +85,7 @@ struct Generator {
   }
 
   ConstraintPtr RandomConstraint() {
-    switch (Uniform(4)) {
+    switch (Uniform(5)) {
       case 0: {
         std::vector<std::string> values;
         size_t n = 1 + Uniform(3);
@@ -93,11 +111,22 @@ struct Generator {
         return std::make_shared<VersionConstraint>(Pick(version_props),
                                                    std::move(intervals));
       }
-      default: {
+      case 3: {
         std::vector<std::string> patterns;
         size_t n = 1 + Uniform(2);
         for (size_t i = 0; i < n; ++i) patterns.push_back(RandomDomainPattern());
         return std::make_shared<DomainConstraint>(Pick(domain_props), patterns);
+      }
+      default: {
+        std::vector<RegionTree::RegionId> regions;
+        size_t n = 1 + Uniform(3);
+        for (size_t i = 0; i < n; ++i) {
+          // Иногда регион, неизвестный дереву (31..34).
+          regions.push_back(1 + static_cast<uint32_t>(Uniform(34)));
+        }
+        return std::make_shared<RegionConstraint>(Pick(region_props), tree,
+                                                  std::move(regions),
+                                                  /*negated=*/Chance(0.5));
       }
     }
   }
@@ -172,6 +201,19 @@ struct Generator {
     }
     for (const auto& p : domain_props) {
       if (Chance(0.75)) req.domains[p] = RandomHost();
+    }
+    for (const auto& p : region_props) {
+      // Иногда явный id (в т.ч. неизвестный дереву), иногда только IP.
+      if (Chance(0.5)) req.regions[p] = 1 + static_cast<uint32_t>(Uniform(34));
+    }
+    if (Chance(0.6)) {
+      if (Chance(0.1)) {
+        req.ip = "not-an-ip";
+      } else {
+        // Иногда адрес вне всех диапазонов (10.0.10.x - 10.0.12.x).
+        req.ip = "10.0." + std::to_string(Uniform(13)) + "." +
+                 std::to_string(Uniform(256));
+      }
     }
     for (const auto& k : id_keys) {
       if (Chance(0.9)) req.ids[k] = "user-" + std::to_string(Uniform(10000));

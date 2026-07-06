@@ -16,6 +16,22 @@ namespace {
 struct Generator {
   std::mt19937_64 rng{20260706};
 
+  Generator() {
+    // Дерево из 500 регионов + 200 диапазонов IP.
+    tree = std::make_shared<RegionTree>();
+    tree->AddRegion(1, 1);
+    for (uint32_t r = 2; r <= 500; ++r) {
+      tree->AddRegion(r, 1 + static_cast<uint32_t>(Uniform(r - 1)));
+    }
+    for (int i = 0; i < 200; ++i) {
+      std::string base =
+          "10." + std::to_string(i / 250) + "." + std::to_string(i % 250) + ".";
+      tree->AddIpRange(base + "0", base + "255",
+                       1 + static_cast<uint32_t>(Uniform(500)));
+    }
+    tree->Build();
+  }
+
   size_t Uniform(size_t n) { return rng() % n; }
   bool Chance(double p) {
     return std::uniform_real_distribution<double>(0, 1)(rng) < p;
@@ -38,6 +54,8 @@ struct Generator {
   std::vector<std::string> slds{"example", "test", "mail", "shop", "news"};
   std::vector<std::string> tlds{"ru", "com", "net", "org"};
   std::vector<std::string> subs{"www", "m", "api", "static", "cdn"};
+  std::vector<std::string> region_props{"geo"};
+  std::shared_ptr<RegionTree> tree;
 
   Version RandomVersion() {
     std::vector<uint32_t> parts;
@@ -49,7 +67,7 @@ struct Generator {
   }
 
   ConstraintPtr RandomConstraint() {
-    switch (Uniform(4)) {
+    switch (Uniform(5)) {
       case 0: {
         std::vector<std::string> values;
         size_t n = 1 + Uniform(5);
@@ -68,7 +86,7 @@ struct Generator {
         return std::make_shared<VersionConstraint>(
             Pick(version_props), std::vector<VersionInterval>{iv});
       }
-      default: {
+      case 3: {
         std::vector<std::string> patterns;
         size_t n = 1 + Uniform(2);
         for (size_t i = 0; i < n; ++i) {
@@ -79,6 +97,16 @@ struct Generator {
           patterns.push_back(std::move(p));
         }
         return std::make_shared<DomainConstraint>(Pick(domain_props), patterns);
+      }
+      default: {
+        std::vector<RegionTree::RegionId> regions;
+        size_t n = 1 + Uniform(3);
+        for (size_t i = 0; i < n; ++i) {
+          regions.push_back(1 + static_cast<uint32_t>(Uniform(500)));
+        }
+        return std::make_shared<RegionConstraint>(Pick(region_props), tree,
+                                                  std::move(regions),
+                                                  Chance(0.3));
       }
     }
   }
@@ -127,6 +155,12 @@ struct Generator {
     size_t extra = Uniform(3);
     for (size_t i = 0; i < extra; ++i) host = Pick(subs) + "." + host;
     req.domains["host"] = host;
+    if (Chance(0.5)) {
+      req.regions["geo"] = 1 + static_cast<uint32_t>(Uniform(500));
+    } else {
+      req.ip = "10.0." + std::to_string(Uniform(250)) + "." +
+               std::to_string(Uniform(256));
+    }
     req.ids["uid"] = "user-" + std::to_string(Uniform(1000000));
     return req;
   }

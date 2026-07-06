@@ -9,6 +9,7 @@
 #include "expassign/bitset.hpp"
 #include "expassign/hash.hpp"
 #include "expassign/matcher.hpp"
+#include "expassign/region_tree.hpp"
 #include "expassign/version.hpp"
 
 namespace expassign {
@@ -28,7 +29,9 @@ namespace expassign {
 //     регионы, для каждого региона предвычислен битсет; поиск региона —
 //     бинарный поиск по границам;
 //   * домены — префиксное дерево по меткам хоста от TLD к младшим со
-//     специальными рёбрами для '{tld}' и пометками '*'.
+//     специальными рёбрами для '{tld}' и пометками '*';
+//   * регионы — hash-map «регион -> эксперименты», проверяемая для каждого
+//     предка региона запроса по цепочке дерева регионов.
 //
 // Если у эксперимента несколько ограничений на одно свойство (например, своё
 // и унаследованное от измерения), они раскладываются по «слоям» одного и того
@@ -91,6 +94,19 @@ class IndexedMatcher final : public IMatcher {
     void Filter(const Request& request, DynamicBitset& out) const;
   };
 
+  struct RegionLayer {
+    std::string property;
+    // Все ограничения слоя обязаны разделять одно дерево регионов
+    // (валидируется при построении).
+    std::shared_ptr<const RegionTree> tree;
+    DynamicBitset unconstrained;
+    DynamicBitset negated;  // эксперименты с ограничением "не входит"
+    std::unordered_map<uint32_t, std::vector<uint32_t>> in_lists;
+    std::unordered_map<uint32_t, std::vector<uint32_t>> not_in_lists;
+
+    void Filter(const Request& request, DynamicBitset& out) const;
+  };
+
   // Ключ кеша хешей: (тип идентификатора, соль).
   struct HashKey {
     std::string id_key;
@@ -111,6 +127,7 @@ class IndexedMatcher final : public IMatcher {
   std::vector<BoolLayer> bool_layers_;
   std::vector<VersionLayer> version_layers_;
   std::vector<DomainLayer> domain_layers_;
+  std::vector<RegionLayer> region_layers_;
 
   std::vector<HashKey> hash_keys_;
   std::unordered_map<std::string, uint32_t> hash_key_index_;

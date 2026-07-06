@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
@@ -18,6 +19,10 @@ struct Request {
   std::unordered_map<std::string, bool> bools;
   std::unordered_map<std::string, Version> versions;
   std::unordered_map<std::string, std::string> domains;  // имя -> интернет-хост
+  std::unordered_map<std::string, uint32_t> regions;     // имя -> id региона
+  // IP пользователя: если явного id региона для свойства нет, регион
+  // определяется по IP через диапазоны дерева регионов.
+  std::string ip;
   std::unordered_map<std::string, std::string> ids;      // тип id -> значение
 };
 

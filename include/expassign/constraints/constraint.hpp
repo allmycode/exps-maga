@@ -12,6 +12,7 @@ enum class PropertyType {
   kBool,
   kVersion,
   kDomain,
+  kRegion,
 };
 
 // Базовый интерфейс ограничения. Ограничение привязано к одному именованному

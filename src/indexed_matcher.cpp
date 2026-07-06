@@ -6,6 +6,7 @@
 #include "expassign/bucketing.hpp"
 #include "expassign/constraints/bool_constraint.hpp"
 #include "expassign/constraints/domain_constraint.hpp"
+#include "expassign/constraints/region_constraint.hpp"
 #include "expassign/constraints/string_constraint.hpp"
 #include "expassign/constraints/version_constraint.hpp"
 
@@ -165,6 +166,26 @@ void IndexedMatcher::DomainLayer::Filter(const Request& request,
   }
 }
 
+// --- RegionLayer --------------------------------------------------------------
+
+void IndexedMatcher::RegionLayer::Filter(const Request& request,
+                                         DynamicBitset& out) const {
+  out.CopyFrom(unconstrained);
+  auto region = RegionConstraint::Resolve(request, property, *tree);
+  if (!region) return;  // регион не определён — все ограниченные мимо
+  out |= negated;
+  // Внутри слоя эксперимент либо позитивный, либо негативный, поэтому Set и
+  // Reset по разным предкам не конфликтуют между собой.
+  tree->ForEachAncestor(*region, [&](uint32_t ancestor) {
+    if (auto n = not_in_lists.find(ancestor); n != not_in_lists.end()) {
+      for (uint32_t exp : n->second) out.Reset(exp);
+    }
+    if (auto p = in_lists.find(ancestor); p != in_lists.end()) {
+      for (uint32_t exp : p->second) out.Set(exp);
+    }
+  });
+}
+
 // --- IndexedMatcher -----------------------------------------------------------
 
 IndexedMatcher::IndexedMatcher(std::vector<FlatExperiment> experiments,
@@ -193,6 +214,8 @@ void IndexedMatcher::BuildIndexes() {
       version_drafts;
   std::unordered_map<std::string, std::vector<LayerDraft<DomainConstraint>>>
       domain_drafts;
+  std::unordered_map<std::string, std::vector<LayerDraft<RegionConstraint>>>
+      region_drafts;
 
   hash_refs_.resize(n);
   for (uint32_t i = 0; i < n; ++i) {
@@ -219,6 +242,10 @@ void IndexedMatcher::BuildIndexes() {
         case PropertyType::kDomain:
           AddToLayers(domain_drafts[c->Property()], n, i,
                       static_cast<const DomainConstraint*>(c.get()));
+          break;
+        case PropertyType::kRegion:
+          AddToLayers(region_drafts[c->Property()], n, i,
+                      static_cast<const RegionConstraint*>(c.get()));
           break;
       }
     }
@@ -322,6 +349,30 @@ void IndexedMatcher::BuildIndexes() {
       domain_layers_.push_back(std::move(layer));
     }
   }
+
+  for (auto& [property, drafts] : region_drafts) {
+    for (auto& draft : drafts) {
+      RegionLayer layer;
+      layer.property = property;
+      layer.unconstrained = UnconstrainedBits(draft, n);
+      layer.negated = DynamicBitset(n);
+      for (const auto& [exp, c] : draft.entries) {
+        if (!layer.tree) {
+          layer.tree = c->Tree();
+        } else if (layer.tree != c->Tree()) {
+          throw std::invalid_argument(
+              "region constraints for property '" + property +
+              "' use different region trees; a single shared tree is required");
+        }
+        auto& lists = c->Negated() ? layer.not_in_lists : layer.in_lists;
+        if (c->Negated()) layer.negated.Set(exp);
+        for (RegionTree::RegionId region : c->Regions()) {
+          lists[region].push_back(exp);
+        }
+      }
+      region_layers_.push_back(std::move(layer));
+    }
+  }
 }
 
 std::vector<Assignment> IndexedMatcher::Match(const Request& request) const {
@@ -342,7 +393,8 @@ std::vector<Assignment> IndexedMatcher::Match(const Request& request) const {
     return true;
   };
   if (!apply(string_layers_) || !apply(bool_layers_) ||
-      !apply(version_layers_) || !apply(domain_layers_)) {
+      !apply(version_layers_) || !apply(domain_layers_) ||
+      !apply(region_layers_)) {
     return result;
   }
 

@@ -15,6 +15,8 @@ add_library(expassign
   src/bool_constraint.cpp
   src/version_constraint.cpp
   src/domain_constraint.cpp
+  src/region_tree.cpp
+  src/region_constraint.cpp
   src/flatten.cpp
   src/naive_matcher.cpp
   src/indexed_matcher.cpp
